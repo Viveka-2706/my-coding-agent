@@ -1,0 +1,2 @@
+- Write simple, readable Python with short comments.
+- Put tests in a file named test_<module>.py and run them with: python -m unittest
