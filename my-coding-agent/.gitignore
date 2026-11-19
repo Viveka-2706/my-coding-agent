@@ -1,6 +1,7 @@
 .env
 workspace/*
 !workspace/AGENT.md
+chats/
 __pycache__/
 .venv/
 node_modules/

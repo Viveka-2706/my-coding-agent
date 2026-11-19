@@ -1,12 +1,12 @@
 # My Coding Agent
 
-A small AI coding agent with a React chat UI and a Python (FastAPI) backend, powered by Groq.
-It works like a mini Claude Code: you describe a task, and the agent plans it, reads and writes
-files, runs commands, and asks your permission before it changes anything.
+An AI coding agent with a React chat UI and a Python (FastAPI) backend, powered by Groq.
+You describe a task. The agent makes a plan, reads and writes files, runs commands and fixes errors,
+and it asks your permission before it changes anything.
 
 ## How to run (Windows)
 
-You need Python 3.10+, Node.js 18+ and a Groq API key.
+You need Python 3.10+, Node.js 18+, Git and a Groq API key.
 
 **1. Backend** (first terminal)
 
@@ -16,7 +16,7 @@ pip install -r requirements.txt
 copy .env.example .env
 ```
 
-Open `backend\.env` and replace the placeholder with your real Groq key, then start the server:
+Open `backend\.env`, paste your Groq key, then start the server:
 
 ```cmd
 uvicorn main:app --port 8000
@@ -30,56 +30,57 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173 in your browser.
+Open http://localhost:5173.
 
-If the model name is rejected, run `python -c "from groq import Groq; print([m.id for m in Groq().models.list().data])"`
-inside `backend` and set `GROQ_MODEL=` in `.env` to one of the names it prints.
+If the model name is rejected, list the models your key can use
+(`python -c "from groq import Groq; print([m.id for m in Groq().models.list().data])"` inside `backend`)
+and set `GROQ_MODEL=` in `.env`.
 
-## Things to try
+## Features
 
-- `create primes.py that prints the first 10 primes, then run it`
-- `build a to-do list module with add, remove and list functions, a test file, and run the tests`
-- `find where add is defined` (uses the grep tool)
+| Feature | How it works |
+| --- | --- |
+| Agent loop | `run_agent` in `backend/agent.py`: ask the model, run the tools it requests, repeat until it answers |
+| Tools | read, list, write, edit, grep, run command, fetch web page, todo plan |
+| Streaming | The answer appears word by word (the model call uses `stream=True`) |
+| Stop button | Cancels the running task; the chat history is repaired so you can keep going |
+| Permissions | Writes, edits, commands and web fetches show an Allow / Deny card; file changes can be allowed for the session |
+| Diffs | Edits and overwrites show red and green lines before you approve |
+| Sandbox | File tools can only reach the `workspace/` folder (`safe_path`) |
+| Planning | The `update_todos` tool fills the Plan panel with a progress bar |
+| Chat history | Every chat is saved in `chats/` and can be reopened or deleted |
+| Undo | `workspace/` is a small Git repo; a commit is made around each task, and Undo goes back one (`checkpoints.py`) |
+| File viewer | Click a file in the right panel to read it with syntax colours |
+| File upload | The paperclip copies a text file into the workspace and mentions it as `@file` |
+| Slash commands, @mentions | `/new`, `/undo`, `/download`, and `@file` suggestions (Tab to complete) |
+| Download | Gets the whole workspace as a zip |
+| Rate-limit retry | If Groq says "too many requests", the agent waits and tries again |
+| Context size | Old tool results are shortened (`trim_context`); the top bar shows a rough token count |
+| Project instructions | `workspace/AGENT.md` is added to the system prompt |
+| Light / dark mode | The button at the bottom of the left sidebar |
 
 ## How it works
 
 ```
-Browser (React)  <--WebSocket-->  FastAPI (main.py)  -->  agent loop (agent.py)  -->  Groq model
-                                                              |
-                                                              +-->  tools inside workspace/
+Browser (React)  <--WebSocket-->  main.py  -->  agent.py (loop)  -->  Groq model
+                                    |                |
+                                    |                +--> tools, only inside workspace/
+                                    +--> chats.py (saved chats)    checkpoints.py (undo)
 ```
-
-The agent loop in `backend/agent.py` is the core:
-
-1. Send the conversation and the list of tools to the model.
-2. If the model asks for tools, run them and add the results to the conversation.
-3. Repeat until the model answers with plain text.
-
-| Building block | Where |
-| --- | --- |
-| Agent loop | `run_agent` in `backend/agent.py` |
-| Tools: read, list, write, edit, grep, run command | functions + `TOOLS` list in `agent.py` |
-| Planning (todo list shown in the UI) | `update_todos` tool |
-| Safety: workspace sandbox | `safe_path` blocks paths outside `workspace/` |
-| Safety: permission before write, edit, run | `NEEDS_PERMISSION` + the Allow / Deny card in the UI |
-| Context management | `trim_context` shortens old tool results |
-| Project instructions | `workspace/AGENT.md` is added to the system prompt |
-| Environment awareness | system prompt tells the model the OS and shell |
-| Web server | `backend/main.py` (WebSocket chat + file list) |
-| UI | `frontend/src/App.jsx` |
 
 ## Folder layout
 
 ```
 my-coding-agent/
-├── backend/      agent.py, main.py, requirements.txt, .env.example
+├── backend/      agent.py, main.py, chats.py, checkpoints.py
 ├── frontend/     React app (Vite)
-└── workspace/    the only folder the agent can touch (AGENT.md = project instructions)
+├── workspace/    the only folder the agent can touch (AGENT.md = project instructions)
+└── chats/        saved chats (created automatically)
 ```
 
 ## Push to GitHub
 
-`.gitignore` already keeps `.env`, `node_modules` and agent-generated files out of Git.
+`.gitignore` already keeps `.env`, `node_modules`, `chats/` and agent-made files out of Git.
 
 ```cmd
 git init

@@ -1,13 +1,15 @@
 """The agent: system prompt, tools and the loop (same idea as agent1.py)."""
 import asyncio
+import difflib
 import json
 import os
 import platform
 import re
 import subprocess
+import urllib.request
 
 from dotenv import load_dotenv
-from groq import AsyncGroq
+from groq import AsyncGroq, RateLimitError
 
 load_dotenv()
 client = AsyncGroq()  # reads GROQ_API_KEY from backend/.env
@@ -26,7 +28,10 @@ SYSTEM = (
     f"You are running on {platform.system()} using the {'cmd.exe' if platform.system() == 'Windows' else 'sh'} shell. "
     "Use commands that work in that shell. Do not use heredocs. "
     "For short Python snippets use: python -c \"...\"; for anything longer, write a .py file and run it. "
-    "When searching with grep, use simple patterns without anchors like ^ or $, because code can be indented. If a search finds little, try a simpler pattern before answering. "
+    "When searching with grep, use simple patterns without anchors like ^ or $, because code can be indented. "
+    "If a search finds little, try a simpler pattern before answering. "
+    "A word like @cart.py in the user's message means a file in the workspace: read it first. "
+    "Use fetch_url only when the user asks for information from the web. "
     "IMPORTANT: for any task that needs three or more steps, your very first action must be to call "
     "update_todos with the full plan. After finishing each step, call update_todos again with new statuses."
 )
@@ -56,7 +61,7 @@ def read_file(path):
 
 
 def list_dir(path="."):
-    items = os.listdir(safe_path(path))
+    items = [i for i in os.listdir(safe_path(path)) if i != ".git"]
     return "\n".join(items) if items else "(empty folder)"
 
 
@@ -82,7 +87,7 @@ def edit_file(path, old, new):
 def grep(pattern, path="."):
     results = []
     for folder, dirs, files in os.walk(safe_path(path)):
-        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        dirs[:] = [d for d in dirs if d not in ("__pycache__", ".git")]
         for name in files:
             full = os.path.join(folder, name)
             try:
@@ -102,6 +107,17 @@ def run_bash(command):
         return (r.stdout + r.stderr).strip() or "(no output)"
     except subprocess.TimeoutExpired:
         return "Error: command timed out after 30 seconds"
+
+
+def fetch_url(url):
+    if not url.startswith(("http://", "https://")):
+        return "Error: only http and https addresses are allowed"
+    request = urllib.request.Request(url, headers={"User-Agent": "my-coding-agent"})
+    with urllib.request.urlopen(request, timeout=10) as r:
+        html = r.read(300_000).decode("utf-8", errors="replace")
+    text = re.sub(r"(?s)<(script|style).*?</\1>", " ", html)  # drop scripts and styles
+    text = re.sub(r"<[^>]+>", " ", text)                      # drop the remaining tags
+    return re.sub(r"\s+", " ", text).strip()[:6000]
 
 
 def update_todos(todos):
@@ -128,6 +144,8 @@ TOOLS = [
          {"pattern": "Regex to search for", "path": "Folder, default '.'"}, ["pattern"]),
     tool("run_bash", "Run a shell command in the workspace",
          {"command": "The command to run"}, ["command"]),
+    tool("fetch_url", "Download a web page and return its text",
+         {"url": "The http or https address"}, ["url"]),
     {"type": "function", "function": {
         "name": "update_todos",
         "description": "Write or update a checklist for multi-step tasks.",
@@ -141,28 +159,39 @@ TOOLS = [
 
 FUNCTIONS = {"read_file": read_file, "list_dir": list_dir, "write_file": write_file,
              "edit_file": edit_file, "grep": grep, "run_bash": run_bash,
-             "update_todos": update_todos}
+             "fetch_url": fetch_url, "update_todos": update_todos}
 
-# These tools change things, so the user must approve them first
-NEEDS_PERMISSION = {"write_file", "edit_file", "run_bash"}
+# These tools change things or reach outside, so the user must approve them first
+NEEDS_PERMISSION = {"write_file", "edit_file", "run_bash", "fetch_url"}
 
 
 def permission_text(name, args):
+    """Returns (title, detail, is_diff) for the approval card."""
     if name == "run_bash":
-        return "Run command", args.get("command", "")
+        return "Run command", args.get("command", ""), False
+    if name == "fetch_url":
+        return "Fetch web page", args.get("url", ""), False
+    path = args.get("path", "")
+    full = safe_path(path)  # blocks paths outside the workspace before asking
     if name == "write_file":
-        return f"Write file {args.get('path')}", args.get("content", "")
+        content = args.get("content", "")
+        if not os.path.exists(full):
+            return f"Create file {path}", content, False
+        with open(full, encoding="utf-8", errors="replace") as f:
+            old = f.read()
+        diff = list(difflib.unified_diff(old.splitlines(), content.splitlines(), lineterm="", n=2))
+        return f"Overwrite file {path}", "\n".join(diff[2:]) or "(no changes)", True
     removed = "\n".join("- " + line for line in args.get("old", "").splitlines())
     added = "\n".join("+ " + line for line in args.get("new", "").splitlines())
-    return f"Edit file {args.get('path')}", removed + "\n" + added
+    return f"Edit file {path}", removed + "\n" + added, True
 
 
 async def execute_tool(name, args, ask):
     if name not in FUNCTIONS:
         return f"Error: unknown tool '{name}'. Available tools: {', '.join(FUNCTIONS)}"
     if name in NEEDS_PERMISSION:
-        title, detail = permission_text(name, args)
-        if not await ask(title, detail):
+        title, detail, is_diff = permission_text(name, args)
+        if not await ask(name, title, detail, is_diff):
             return "User denied this action."
     return await asyncio.to_thread(FUNCTIONS[name], **args)
 
@@ -176,29 +205,60 @@ def trim_context(messages, keep_last=6, max_chars=300):
             m["content"] = m["content"][:max_chars] + " ...[truncated]"
 
 
+# ---------- talking to the model ----------
+async def call_model(messages, send):
+    """Start a streaming request. If Groq says 'too many requests', wait and try again."""
+    for attempt in range(4):
+        try:
+            return await client.chat.completions.create(
+                model=MODEL, messages=messages, tools=TOOLS, tool_choice="auto", stream=True)
+        except RateLimitError:
+            if attempt == 3:
+                raise
+            wait = 5 * 2 ** attempt
+            await send({"type": "note", "text": f"Groq rate limit reached. Retrying in {wait} seconds..."})
+            await asyncio.sleep(wait)
+
+
 # ---------- the agent loop ----------
 async def run_agent(messages, send, ask, max_steps=20):
     for _ in range(max_steps):
         trim_context(messages)
-        resp = await client.chat.completions.create(
-            model=MODEL, messages=messages, tools=TOOLS, tool_choice="auto")
-        msg = resp.choices[0].message
+        stream = await call_model(messages, send)
 
-        assistant = {"role": "assistant", "content": msg.content or ""}
-        if msg.tool_calls:
+        content = ""
+        calls = {}  # tool calls arrive in small pieces, so collect them by index
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if delta.content:
+                content += delta.content
+                await send({"type": "token", "text": delta.content})
+            for piece in delta.tool_calls or []:
+                call = calls.setdefault(piece.index, {"id": "", "name": "", "arguments": ""})
+                call["id"] = piece.id or call["id"]
+                if piece.function:
+                    call["name"] = piece.function.name or call["name"]
+                    call["arguments"] += piece.function.arguments or ""
+        if content:
+            await send({"type": "answer", "text": content})
+
+        assistant = {"role": "assistant", "content": content}
+        if calls:
             assistant["tool_calls"] = [
-                {"id": c.id, "type": "function",
-                 "function": {"name": c.function.name, "arguments": c.function.arguments}}
-                for c in msg.tool_calls]
+                {"id": c["id"], "type": "function",
+                 "function": {"name": c["name"], "arguments": c["arguments"]}}
+                for c in calls.values()]
         messages.append(assistant)
 
-        if not msg.tool_calls:
-            return msg.content or ""
+        if not calls:
+            return
 
-        for call in msg.tool_calls:
-            name = call.function.name
+        for call in calls.values():
+            name = call["name"]
             try:
-                args = json.loads(call.function.arguments or "{}")
+                args = json.loads(call["arguments"] or "{}")
                 if name == "update_todos":
                     await send({"type": "todos", "todos": args.get("todos", [])})
                 else:
@@ -208,5 +268,5 @@ async def run_agent(messages, send, ask, max_steps=20):
                 out = f"Error: {e}"
             if name != "update_todos":
                 await send({"type": "result", "output": str(out)[:3000]})
-            messages.append({"role": "tool", "tool_call_id": call.id, "content": str(out)[:10000]})
-    return "Stopped: max steps reached"
+            messages.append({"role": "tool", "tool_call_id": call["id"], "content": str(out)[:10000]})
+    await send({"type": "note", "text": "Stopped: reached the step limit for one task."})
