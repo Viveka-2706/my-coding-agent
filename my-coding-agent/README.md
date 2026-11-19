@@ -41,6 +41,7 @@ and set `GROQ_MODEL=` in `.env`.
 | Feature | How it works |
 | --- | --- |
 | Agent loop | `run_agent` in `backend/agent.py`: ask the model, run the tools it requests, repeat until it answers |
+| Reviewer agent | After a task that changed files, a second agent with its own instructions reads the git diff and the test output and says APPROVED or CHANGES NEEDED. If changes are needed, the coder gets the feedback for one fix round (`run_with_review` in `agent.py`). The Reviewer switch in the top bar turns it on or off |
 | Tools | read, list, write, edit, grep, run command, fetch web page, todo plan |
 | Streaming | The answer appears word by word (the model call uses `stream=True`) |
 | Stop button | Cancels the running task; the chat history is repaired so you can keep going |

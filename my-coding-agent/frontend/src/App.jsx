@@ -31,6 +31,24 @@ const LABEL = {
   fetch_url: (a) => `Fetched ${a.url}`,
 };
 const labelOf = (name, args) => (LABEL[name] ? LABEL[name](args) : name);
+// The backend cuts chat titles at 40 characters: finish them at a whole word
+const tidyTitle = (t) => {
+  if (t.length < 40) return t;
+  const cut = t.lastIndexOf(" ");
+  return (cut > 15 ? t.slice(0, cut) : t).replace(/[\s,.;:-]+$/, "") + "…";
+};
+
+// Group the chat list into Today / Yesterday / Earlier
+function groupChats(chats) {
+  const startOfToday = new Date().setHours(0, 0, 0, 0) / 1000;
+  const groups = [["Today", []], ["Yesterday", []], ["Earlier", []]];
+  chats.forEach((c) => {
+    const i = c.updated >= startOfToday ? 0 : c.updated >= startOfToday - 86400 ? 1 : 2;
+    groups[i][1].push(c);
+  });
+  return groups.filter(([, list]) => list.length > 0);
+}
+
 const prefix = (text, sign) =>
   String(text ?? "").split("\n").map((l) => `${sign} ${l}`).join("\n");
 
@@ -63,13 +81,23 @@ function applyEvent(items, m) {
       }
       return copy;
     }
-    case "note":
+    case "note": {
+      // "Allowed: ..." / "Denied: ..." belongs on the tool card above it, not as a separate line
+      const approval = /^(Allowed|Denied|Auto-allowed):/.exec(m.text)?.[1];
+      if (approval && last && last.kind === "tool" && last.output === undefined) {
+        return [...items.slice(0, -1), { ...last, approval }];
+      }
       return [...items, { kind: "note", text: m.text }];
+    }
+    case "reviewing": // the reviewer started checking
+      return [...items, { kind: "review", pending: true }];
+    case "review": // the reviewer's verdict replaces the "checking" line
+      return [...items.filter((it) => !it.pending), { kind: "review", approved: m.approved, text: m.text }];
     case "error":
-      return [...items, { kind: "error", text: m.text }];
+      return [...items.filter((it) => !it.pending), { kind: "error", text: m.text }];
     case "stopped":
       return [
-        ...items.map((it) => (it.streaming ? { ...it, streaming: false } : it)),
+        ...items.filter((it) => !it.pending).map((it) => (it.streaming ? { ...it, streaming: false } : it)),
         { kind: "note", text: "Stopped." },
       ];
     default:
@@ -91,6 +119,14 @@ const ICONS = {
   undo: "M1 4v6h6M3.51 15a9 9 0 102.13-9.36L1 10",
   close: "M6 6l12 12M18 6L6 18",
   panel: "M3 5h18v14H3zM15 5v14",
+  terminal: "M4 17l6-6-6-6M12 19h8",
+  search: "M11 4a7 7 0 100 14 7 7 0 000-14zM21 21l-4.3-4.3",
+  globe: "M12 3a9 9 0 100 18 9 9 0 000-18zM3 12h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9z",
+  folder: "M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z",
+  pencil: "M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z",
+  check: "M5 13l4 4L19 7",
+  warn: "M12 9v4M12 17h.01M10.3 3.9L2.4 18a2 2 0 001.7 3h15.8a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z",
+  arrowdown: "M12 5v14M19 12l-7 7-7-7",
 };
 
 function Icon({ name, size = 18 }) {
@@ -141,6 +177,11 @@ function Diff({ text }) {
   );
 }
 
+const TOOL_ICON = {
+  read_file: "file", write_file: "pencil", edit_file: "pencil",
+  list_dir: "folder", grep: "search", run_bash: "terminal", fetch_url: "globe",
+};
+
 function Tool({ it }) {
   const a = it.args || {};
   const out = it.output;
@@ -148,8 +189,9 @@ function Tool({ it }) {
   return (
     <details className="tool">
       <summary>
-        <span className={`dot ${state}`} />
+        <span className={`tool-icon ${state}`}><Icon name={TOOL_ICON[it.name] || "file"} size={16} /></span>
         <span className="tool-label">{labelOf(it.name, a)}</span>
+        {it.approval && <span className={`badge ${it.approval === "Denied" ? "denied" : ""}`}>{it.approval}</span>}
         <span className="chev"><Icon name="chevron" size={16} /></span>
       </summary>
       <div className="tool-body">
@@ -190,11 +232,32 @@ function Answer({ it }) {
   );
 }
 
+function Review({ it }) {
+  if (it.pending)
+    return (
+      <div className="review pending">
+        <span className="dot running" /> Reviewer agent is checking the changes...
+      </div>
+    );
+  return (
+    <div className={`review ${it.approved ? "ok" : "bad"}`}>
+      <strong className="review-title">
+        <Icon name={it.approved ? "check" : "warn"} size={16} />
+        {it.approved ? "Reviewer: approved" : "Reviewer: changes needed"}
+      </strong>
+      <div className="md">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{it.text}</ReactMarkdown>
+      </div>
+    </div>
+  );
+}
+
 function Item({ it }) {
   if (it.kind === "user") return <div className="user">{it.text}</div>;
   if (it.kind === "answer") return <Answer it={it} />;
   if (it.kind === "error") return <div className="error">{it.text}</div>;
   if (it.kind === "note") return <div className="note">{it.text}</div>;
+  if (it.kind === "review") return <Review it={it} />;
   return <Tool it={it} />;
 }
 
@@ -237,13 +300,17 @@ export default function App() {
   const [confirm, setConfirm] = useState(null); // pending permission request
   const [usage, setUsage] = useState(0); // rough size of the conversation, in tokens
   const [viewer, setViewer] = useState(null); // file shown in the pop-up
+  const [reviewOn, setReviewOn] = useState(true); // let a second agent review each task
   const [panelOpen, setPanelOpen] = useState(true); // right panel shown or hidden
+  const [sidebarOpen, setSidebarOpen] = useState(true); // left sidebar shown or hidden
+  const [showJump, setShowJump] = useState(false); // "scroll to latest" button
   const [workspaceOpen, setWorkspaceOpen] = useState(false); // file list opened or closed
   const [theme, setTheme] = useState(document.documentElement.dataset.theme || "light");
   const wsRef = useRef(null);
   const endRef = useRef(null);
   const inputRef = useRef(null);
   const fileRef = useRef(null);
+  const stickRef = useRef(true); // true while the reader is at the bottom of the chat
 
   const send = (obj) => wsRef.current?.send(JSON.stringify(obj));
   const addLocal = (event) => setItems((prev) => applyEvent(prev, event));
@@ -259,6 +326,7 @@ export default function App() {
       setTodos([]); // a plan is only shown while the agent is working
       setUsage(m.events.filter((e) => e.type === "usage").pop()?.tokens || 0);
       setActiveId(m.id);
+      stickRef.current = true;
       setConfirm(null);
       setBusy(false);
       loadFiles();
@@ -305,9 +373,22 @@ export default function App() {
     try { localStorage.setItem("theme", theme); } catch {}
   }, [theme]);
 
+  // Follow new messages, unless the reader scrolled up on purpose
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "auto" });
+    if (stickRef.current) endRef.current?.scrollIntoView({ behavior: "auto" });
   }, [items, confirm]);
+
+  const onScroll = (e) => {
+    const el = e.currentTarget;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    stickRef.current = nearBottom;
+    setShowJump(!nearBottom);
+  };
+  const jumpToLatest = () => {
+    stickRef.current = true;
+    setShowJump(false);
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
 
   // Make the text box grow with its content
   useEffect(() => {
@@ -347,9 +428,10 @@ export default function App() {
     if (!t || busy || !connected) return;
     setText("");
     if (COMMANDS.some((c) => c.name === t)) return runCommand(t);
+    stickRef.current = true;
     addLocal({ type: "user", text: t });
     setBusy(true);
-    send({ type: "task", text: t });
+    send({ type: "task", text: t, review: reviewOn });
   };
 
   const answerPermission = (ok, always = false) => {
@@ -395,12 +477,13 @@ export default function App() {
   };
 
   const doneCount = todos.filter((t) => t.status === "done").length;
-  const title = chats.find((c) => c.id === activeId)?.title || "New chat";
+  const title = tidyTitle(chats.find((c) => c.id === activeId)?.title || "New chat");
   const streaming = items.length > 0 && items[items.length - 1].streaming;
 
   return (
     <div className={`app ${panelOpen ? "" : "wide"}`}>
       {/* ----- left: chat history ----- */}
+      {sidebarOpen && (
       <aside className="sidebar">
         <div className="brand">
           <Mark />
@@ -413,12 +496,17 @@ export default function App() {
         <h2>History</h2>
         <div className="history">
           {chats.length === 0 && <p className="muted pad">Your chats will appear here.</p>}
-          {chats.map((c) => (
-            <div key={c.id} className={`hist ${c.id === activeId ? "active" : ""}`}>
-              <button className="hist-title" onClick={() => openChat(c.id)} title={c.title}>{c.title}</button>
-              <button className="hist-del" aria-label="Delete chat" onClick={() => deleteChat(c.id)}>
-                <Icon name="close" size={14} />
-              </button>
+          {groupChats(chats).map(([label, list]) => (
+            <div key={label}>
+              <div className="hist-group">{label}</div>
+              {list.map((c) => (
+                <div key={c.id} className={`hist ${c.id === activeId ? "active" : ""}`}>
+                  <button className="hist-title" onClick={() => openChat(c.id)} title={c.title}>{tidyTitle(c.title)}</button>
+                  <button className="hist-del" aria-label="Delete chat" onClick={() => deleteChat(c.id)}>
+                    <Icon name="close" size={14} />
+                  </button>
+                </div>
+              ))}
             </div>
           ))}
         </div>
@@ -434,12 +522,23 @@ export default function App() {
           </button>
         </div>
       </aside>
+      )}
 
       {/* ----- middle: the chat ----- */}
       <main className="main">
         <header className="topbar">
-          <strong className="chat-title">{title}</strong>
+          <div className="top-left">
+            <button className="ghost icon-btn flip" onClick={() => setSidebarOpen(!sidebarOpen)}
+              aria-label={sidebarOpen ? "Hide chat history" : "Show chat history"} aria-pressed={sidebarOpen}>
+              <Icon name="panel" />
+            </button>
+            <strong className="chat-title">{title}</strong>
+          </div>
           <div className="top-right">
+            <label className="switch" title="A second AI agent reviews the file changes after each task">
+              <input type="checkbox" checked={reviewOn} onChange={(e) => setReviewOn(e.target.checked)} />
+              Reviewer agent
+            </label>
             {usage > 0 && <span className="muted">about {usage.toLocaleString()} tokens in this chat</span>}
             <button className="ghost icon-btn" onClick={() => setPanelOpen(!panelOpen)}
               aria-label={panelOpen ? "Hide side panel" : "Show side panel"} aria-pressed={panelOpen}>
@@ -448,7 +547,8 @@ export default function App() {
           </div>
         </header>
 
-        <div className="feed">
+        <div className="feed-wrap">
+        <div className="feed" onScroll={onScroll}>
           <div className="column">
             {items.length === 0 && (
               <div className="empty">
@@ -490,6 +590,12 @@ export default function App() {
             )}
             <div ref={endRef} />
           </div>
+        </div>
+        {showJump && (
+          <button className="jump" onClick={jumpToLatest} aria-label="Scroll to the latest message">
+            <Icon name="arrowdown" size={18} />
+          </button>
+        )}
         </div>
 
         <div className="input">

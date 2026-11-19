@@ -36,6 +36,14 @@ def save(message):
         git("commit", "-m", message[:60])
 
 
+def pending_diff():
+    """The changes made since the last commit (what the reviewer looks at)."""
+    if not READY:
+        return ""
+    git("add", "-A")
+    return git("diff", "--cached").stdout
+
+
 def undo():
     """Go back one commit. Returns (worked, message)."""
     if not READY:

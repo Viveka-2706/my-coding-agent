@@ -13,7 +13,11 @@ from groq import AsyncGroq, RateLimitError
 
 load_dotenv()
 client = AsyncGroq()  # reads GROQ_API_KEY from backend/.env
+# The reviewer can use its own Groq key (its own rate limits). Without one it shares the coder's key.
+REVIEW_KEY = os.getenv("REVIEW_GROQ_API_KEY")
+review_client = AsyncGroq(api_key=REVIEW_KEY) if REVIEW_KEY else client
 MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+REVIEW_MODEL = os.getenv("REVIEW_MODEL", MODEL)  # the reviewer can use a different model
 
 # The agent can only touch files inside this folder
 WORKSPACE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "workspace"))
@@ -206,18 +210,23 @@ def trim_context(messages, keep_last=6, max_chars=300):
 
 
 # ---------- talking to the model ----------
-async def call_model(messages, send):
-    """Start a streaming request. If Groq says 'too many requests', wait and try again."""
+async def with_retry(call, send):
+    """Run an API call. If Groq says 'too many requests', wait and try again."""
     for attempt in range(4):
         try:
-            return await client.chat.completions.create(
-                model=MODEL, messages=messages, tools=TOOLS, tool_choice="auto", stream=True)
+            return await call()
         except RateLimitError:
             if attempt == 3:
                 raise
             wait = 5 * 2 ** attempt
             await send({"type": "note", "text": f"Groq rate limit reached. Retrying in {wait} seconds..."})
             await asyncio.sleep(wait)
+
+
+async def call_model(messages, send):
+    """Start a streaming request to the coder model."""
+    return await with_retry(lambda: client.chat.completions.create(
+        model=MODEL, messages=messages, tools=TOOLS, tool_choice="auto", stream=True), send)
 
 
 # ---------- the agent loop ----------
@@ -270,3 +279,61 @@ async def run_agent(messages, send, ask, max_steps=20):
                 await send({"type": "result", "output": str(out)[:3000]})
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": str(out)[:10000]})
     await send({"type": "note", "text": "Stopped: reached the step limit for one task."})
+
+
+# ---------- the reviewer agent ----------
+REVIEW_SYSTEM = (
+    "You are a strict but fair code reviewer. You get the user's request, the changes the coder made "
+    "(a git diff) and the output of the commands the coder ran. Check: does it do what was asked, "
+    "are there bugs or missing edge cases, did the tests (if any) pass, is anything unsafe. "
+    "Reply in this format: the first line is exactly APPROVED or CHANGES NEEDED. "
+    "Then give at most 5 short lines, each starting with '- '. Do not rewrite the code. "
+    "If everything is fine, write APPROVED and one line saying why."
+)
+
+
+def command_outputs(messages):
+    """Output of the shell commands the coder ran (this shows the reviewer if tests passed)."""
+    names, outputs = {}, []
+    for m in messages:
+        for c in m.get("tool_calls", []):
+            names[c["id"]] = c["function"]["name"]
+        if m["role"] == "tool" and names.get(m["tool_call_id"]) == "run_bash":
+            outputs.append(m["content"][:500])
+    return "\n---\n".join(outputs[-3:]) or "(no commands were run)"
+
+
+async def review(request, diff, outputs, send):
+    """A second agent checks the coder's work. Returns (approved, feedback)."""
+    prompt = (f"User request:\n{request}\n\nChanges (git diff):\n{diff[:6000]}\n\n"
+              f"Command output:\n{outputs}")
+    resp = await with_retry(lambda: review_client.chat.completions.create(
+        model=REVIEW_MODEL,
+        messages=[{"role": "system", "content": REVIEW_SYSTEM}, {"role": "user", "content": prompt}]), send)
+    text = (resp.choices[0].message.content or "").strip()
+    verdict = text.upper()[:40]
+    approved = "APPROVED" in verdict and "CHANGES" not in verdict
+    feedback = "\n".join(text.splitlines()[1:]).strip() or text
+    return approved, feedback
+
+
+async def run_with_review(messages, start, request, send, ask, get_diff):
+    """The coder works, then the reviewer checks the changes. At most one fix round."""
+    await run_agent(messages, send, ask)
+    for round_number in range(2):
+        diff = get_diff()
+        if not diff:
+            return  # nothing changed, so there is nothing to review
+        await send({"type": "reviewing"})
+        try:
+            approved, feedback = await review(request, diff, command_outputs(messages[start:]), send)
+        except Exception as e:  # a failing reviewer must never break the task
+            await send({"type": "error", "text": f"Reviewer unavailable: {e}"})
+            return
+        await send({"type": "review", "approved": approved, "text": feedback})
+        if approved or round_number == 1:
+            return
+        messages.append({"role": "user", "content":
+                         "A reviewer checked your work and found problems:\n" + feedback +
+                         "\nFix these issues, then reply with a short summary."})
+        await run_agent(messages, send, ask)

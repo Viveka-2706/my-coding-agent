@@ -10,7 +10,7 @@ from fastapi.responses import Response
 
 import chats
 import checkpoints
-from agent import WORKSPACE, build_system, run_agent, safe_path
+from agent import WORKSPACE, build_system, run_agent, run_with_review, safe_path
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -96,7 +96,7 @@ async def chat_socket(ws: WebSocket):
         del chat["messages"][start:]
         chat["messages"] += [{"role": "user", "content": text}, {"role": "assistant", "content": note}]
 
-    async def run_turn(text):
+    async def run_turn(text, review_on):
         start = len(chat["messages"])
         chat["messages"].append({"role": "user", "content": text})
         chat["events"].append({"type": "user", "text": text})
@@ -104,7 +104,10 @@ async def chat_socket(ws: WebSocket):
             chat["title"] = text[:40]
         checkpoints.save("before: " + text)
         try:
-            await run_agent(chat["messages"], emit, ask)
+            if review_on:
+                await run_with_review(chat["messages"], start, text, emit, ask, checkpoints.pending_diff)
+            else:
+                await run_agent(chat["messages"], emit, ask)
         except asyncio.CancelledError:
             rollback(start, text, "Task stopped by the user.")
             await emit({"type": "stopped"})
@@ -130,7 +133,8 @@ async def chat_socket(ws: WebSocket):
             busy = task is not None and not task.done()
 
             if kind == "task" and not busy:
-                task = asyncio.create_task(run_turn(data["text"]))
+                review_on = bool(data.get("review")) and checkpoints.READY  # the reviewer needs Git
+                task = asyncio.create_task(run_turn(data["text"], review_on))
             elif kind == "stop" and busy:
                 task.cancel()
             elif kind == "confirm_reply" and waiting and not waiting.done():

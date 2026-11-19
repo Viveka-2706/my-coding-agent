@@ -242,3 +242,62 @@ button:focus-visible, textarea:focus-visible, summary:focus-visible, a:focus-vis
 .wide .user, .wide .agent { font-size: 17px; }
 .wide .md code { font-size: 15px; }
 .wide .tool, .wide .note { font-size: 15px; }
+
+/* ---------- reviewer agent ---------- */
+.switch { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; cursor: pointer; }
+.switch input { accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer; }
+.review { margin-left: 42px; border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 10px; padding: 10px 14px; background: var(--surface); font-size: 14px; }
+.review.bad { border-left-color: var(--warn); }
+.review.pending { display: flex; align-items: center; gap: 10px; color: var(--muted); }
+.review .md { margin-top: 4px; }
+
+/* ---------- polish ---------- */
+* { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+button, .card, .hist, .tool summary { transition: background 0.15s, border-color 0.15s, color 0.15s, filter 0.15s; }
+button:hover:not(:disabled):not(.ghost):not(.hist-title):not(.link):not(.suggest button) { filter: brightness(1.1); }
+.tool summary:hover { background: var(--accent-soft); border-radius: 10px; }
+.column { gap: 16px; }
+
+/* tool cards */
+.tool-icon { display: flex; flex: none; color: var(--muted); }
+.tool-icon.ok { color: var(--accent); }
+.tool-icon.fail { color: var(--bad); }
+.tool-icon.running { color: var(--warn); animation: pulse 1s ease-in-out infinite; }
+.badge { font-size: 12px; padding: 1px 9px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
+.badge.denied { background: var(--del); color: var(--bad); }
+
+/* reviewer card */
+.review-title { display: flex; align-items: center; gap: 8px; }
+.review.ok .review-title { color: var(--accent); }
+.review.bad .review-title { color: var(--warn); }
+
+/* history groups */
+.hist-group { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); padding: 12px 8px 4px; }
+
+/* top bar */
+.top-left { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.top-left .icon-btn { border-color: var(--line); color: var(--ink); }
+.flip svg { transform: scaleX(-1); }
+
+/* scroll to latest */
+.feed-wrap { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; }
+.jump {
+  position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
+  width: 36px; height: 36px; padding: 0; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--line);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+.jump:hover { border-color: var(--accent); }
+
+/* new messages fade in (not for people who turned animations off) */
+@media (prefers-reduced-motion: no-preference) {
+  .column > * { animation: fadein 0.2s ease-out; }
+  @keyframes fadein { from { opacity: 0; transform: translateY(4px); } }
+}
+@media (prefers-reduced-motion: reduce) { .tool-icon.running { animation: none; } }
