@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import hljs from "highlight.js/lib/common";
+import { chatToHtml, chatToMarkdown, download } from "./share.jsx";
 import "./App.css";
 
 const API = "http://localhost:8000";
@@ -127,6 +128,8 @@ const ICONS = {
   check: "M5 13l4 4L19 7",
   warn: "M12 9v4M12 17h.01M10.3 3.9L2.4 18a2 2 0 001.7 3h15.8a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z",
   arrowdown: "M12 5v14M19 12l-7 7-7-7",
+  share: "M18 8a3 3 0 100-6 3 3 0 000 6zM6 15a3 3 0 100-6 3 3 0 000 6zM18 22a3 3 0 100-6 3 3 0 000 6zM8.6 13.5l6.8 4M15.4 6.5l-6.8 4",
+  copy: "M9 9h11v11H9zM5 15H4V4h11v1",
 };
 
 function Icon({ name, size = 18 }) {
@@ -304,6 +307,8 @@ export default function App() {
   const [panelOpen, setPanelOpen] = useState(true); // right panel shown or hidden
   const [sidebarOpen, setSidebarOpen] = useState(true); // left sidebar shown or hidden
   const [showJump, setShowJump] = useState(false); // "scroll to latest" button
+  const [shareOpen, setShareOpen] = useState(false); // the Share menu
+  const [shareMsg, setShareMsg] = useState(""); // short message on the Share button
   const [workspaceOpen, setWorkspaceOpen] = useState(false); // file list opened or closed
   const [theme, setTheme] = useState(document.documentElement.dataset.theme || "light");
   const wsRef = useRef(null);
@@ -400,7 +405,12 @@ export default function App() {
 
   // Close the file pop-up with Esc
   useEffect(() => {
-    const onKey = (e) => e.key === "Escape" && setViewer(null);
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        setViewer(null);
+        setShareOpen(false);
+      }
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
@@ -480,6 +490,22 @@ export default function App() {
   const title = tidyTitle(chats.find((c) => c.id === activeId)?.title || "New chat");
   const streaming = items.length > 0 && items[items.length - 1].streaming;
 
+  // ----- sharing: copy the chat, or save it as a Markdown file or a web page -----
+  const fileName = (ext) => (title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "chat") + ext;
+  const doShare = (kind) => {
+    const markdown = chatToMarkdown(items, title, labelOf);
+    setShareOpen(false);
+    if (kind === "copy") {
+      navigator.clipboard.writeText(markdown);
+      setShareMsg("Copied!");
+      setTimeout(() => setShareMsg(""), 1500);
+    } else if (kind === "md") {
+      download(fileName(".md"), markdown, "text/markdown");
+    } else {
+      download(fileName(".html"), chatToHtml(markdown, title), "text/html");
+    }
+  };
+
   return (
     <div className={`app ${panelOpen ? "" : "wide"}`}>
       {/* ----- left: chat history ----- */}
@@ -540,6 +566,22 @@ export default function App() {
               Reviewer agent
             </label>
             {usage > 0 && <span className="muted">about {usage.toLocaleString()} tokens in this chat</span>}
+            <div className="share">
+              <button className="ghost with-icon" onClick={() => setShareOpen(!shareOpen)}
+                disabled={items.length === 0} aria-haspopup="menu" aria-expanded={shareOpen}>
+                <Icon name="share" size={16} /> {shareMsg || "Share"}
+              </button>
+              {shareOpen && (
+                <>
+                  <div className="menu-backdrop" onClick={() => setShareOpen(false)} />
+                  <div className="menu" role="menu">
+                    <button role="menuitem" onClick={() => doShare("copy")}><Icon name="copy" size={16} /> Copy as Markdown</button>
+                    <button role="menuitem" onClick={() => doShare("md")}><Icon name="download" size={16} /> Download as .md file</button>
+                    <button role="menuitem" onClick={() => doShare("html")}><Icon name="globe" size={16} /> Download as web page</button>
+                  </div>
+                </>
+              )}
+            </div>
             <button className="ghost icon-btn" onClick={() => setPanelOpen(!panelOpen)}
               aria-label={panelOpen ? "Hide side panel" : "Show side panel"} aria-pressed={panelOpen}>
               <Icon name="panel" />

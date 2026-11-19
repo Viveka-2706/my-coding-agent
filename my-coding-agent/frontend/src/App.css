@@ -301,3 +301,15 @@ button:hover:not(:disabled):not(.ghost):not(.hist-title):not(.link):not(.suggest
   @keyframes fadein { from { opacity: 0; transform: translateY(4px); } }
 }
 @media (prefers-reduced-motion: reduce) { .tool-icon.running { animation: none; } }
+
+/* ---------- share menu ---------- */
+.share { position: relative; }
+.menu-backdrop { position: fixed; inset: 0; z-index: 20; }
+.menu {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 21; min-width: 230px;
+  display: flex; flex-direction: column; padding: 6px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+}
+.menu button { display: flex; align-items: center; gap: 10px; text-align: left; padding: 8px 10px; background: none; color: var(--ink); border: 0; border-radius: 8px; }
+.menu button:hover { background: var(--accent-soft); }
